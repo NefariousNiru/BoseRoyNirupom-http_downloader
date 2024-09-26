@@ -64,11 +64,12 @@ SSL *wrap_tcp_socket(SSL_CTX *ssl_ctx, int sock) {
 
 
 // This function opens a socket and establishes a TCP Connection 
-int connect_socket(const char *ip_address, int port) {
+int open_TCP_socket(const char *ip_address, int port) {
     int sock;
     struct sockaddr_in server_address;
 
-    // Create a TCP Socket 
+    // Create a TCP Socket (specified by SOCK_STREAM and 0)
+    // For UDP use (SOCK_DGRAM)
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Error: Socket Creation was unsuccessful!");
@@ -92,7 +93,7 @@ int connect_socket(const char *ip_address, int port) {
 
 
 // Function to calculate the MD5 hash of a given file using EVP
-void calculate_md5(const char *filename, unsigned char *result) {
+void calculate_md5_checksum(const char *filename, unsigned char *result) {
     // Open the output file
     FILE *file = fopen(filename, "rb");
     if (!file) {
@@ -179,7 +180,7 @@ void combine_downloaded_parts(const char *output_file, int num_parts) {
 // Thread function to download a byte range of file
 void *download_part(void *arg) {
     DownloadArgs *args = (DownloadArgs *)arg;
-    int sock = connect_socket(args->ip_address, 443);
+    int sock = open_TCP_socket(args->ip_address, 443);
     SSL *ssl = wrap_tcp_socket(args->ssl_ctx, sock);
 
     // Construct the HTTP GET request with Range header
@@ -459,17 +460,17 @@ int main(int argc, char *argv[]) {
     printf("Number of Parts: %d\n", args.download_parts);
     printf("Output File Path: %s\n", args.output_file_name);
 
-    // Initialise SSL and store it in ssl_context
-    SSL_CTX *ssl_ctx = ssl_init();
-
     // Get the domain ip_address by resolving it
     char ip_address[INET6_ADDRSTRLEN];
     resolve_domain(args.target_url.domain, ip_address);
 
     // Open a socket for a tcp connection
     int port = 443;
-    int sock = connect_socket(ip_address, port);
+    int sock = open_TCP_socket(ip_address, port);
     printf("Success: Connected to server at %s:%d\n", ip_address, port);
+
+    // Initialise SSL and store it in ssl_context
+    SSL_CTX *ssl_ctx = ssl_init();
 
     // Wrap TCP socket with SSL/TLS and establish secure connection (handshake)
     SSL *ssl = wrap_tcp_socket(ssl_ctx, sock);
@@ -487,7 +488,7 @@ int main(int argc, char *argv[]) {
     }
     printf("\nFile Size: %ld bytes", file_size);
 
-    // Get byte ranges for multi-threaded download in parts
+    // Get byte ranges for multi-threaded download
     ByteRange ranges[args.download_parts];
     set_byte_range(ranges, args.download_parts, file_size);
     printf("\nChunking Bytes into %i Parts.\n", args.download_parts);
@@ -518,7 +519,7 @@ int main(int argc, char *argv[]) {
 
     // Generate MD5 hash and print the MD5 hash in Base 16
     unsigned char md5_result[MD5_DIGEST_LENGTH];
-    calculate_md5(args.output_file_name, md5_result);
+    calculate_md5_checksum(args.output_file_name, md5_result);
     printf("\nMD5 Hash of %s: ", args.output_file_name);
     for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
         printf("%02x", md5_result[i]);
