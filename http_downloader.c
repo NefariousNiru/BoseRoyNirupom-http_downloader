@@ -43,7 +43,8 @@ typedef struct {
     URL url;
     ByteRange range;
     int part_number;
-} DownloadArgs;
+    int address_family;
+} DownloadArguments;
 
 
 // This function wraps the TCP Connection Socket with SSL/TLS and perform SSL handshake 
@@ -64,28 +65,43 @@ SSL *wrap_tcp_socket(SSL_CTX *ssl_ctx, int sock) {
 
 
 // This function opens a socket and establishes a TCP Connection 
-int open_TCP_socket(const char *ip_address, int port) {
+int open_TCP_socket(const char *ip_address, int port, int address_family) {
     int sock;
-    struct sockaddr_in server_address;
+    struct sockaddr_in server_address_ipv4;
+    struct sockaddr_in6 server_address_ipv6;
 
     // Create a TCP Socket (specified by SOCK_STREAM and 0)
     // For UDP use (SOCK_DGRAM)
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    sock = socket(address_family, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("Error: Socket Creation was unsuccessful!");
         exit(EXIT_FAILURE);
     }
 
-    // Configure the structure of the server address
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(port);
-    inet_pton(AF_INET, ip_address, &server_address.sin_addr);
+    // Set up server address based on IPv4 or IPv6
+    if (address_family == AF_INET) {
+        server_address_ipv4.sin_family = AF_INET;
+        server_address_ipv4.sin_port = htons(port);
+        inet_pton(AF_INET, ip_address, &server_address_ipv4.sin_addr);
 
-    // Connect to server
-    if(connect(sock, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
-        perror("Error: TCP Connection Failed");
-        close(sock);
-        exit(EXIT_FAILURE);
+        // Connect using IPv4
+        if (connect(sock, (struct sockaddr *)&server_address_ipv4, sizeof(server_address_ipv4)) < 0) {
+            perror("Error: TCP connection (IPv4) failed");
+            close(sock);
+            exit(EXIT_FAILURE);
+        }
+
+    } else if (address_family == AF_INET6) {
+        server_address_ipv6.sin6_family = AF_INET6;
+        server_address_ipv6.sin6_port = htons(port);
+        inet_pton(AF_INET6, ip_address, &server_address_ipv6.sin6_addr);
+
+        // Connect using IPv6
+        if (connect(sock, (struct sockaddr *)&server_address_ipv6, sizeof(server_address_ipv6)) < 0) {
+            perror("Error: TCP connection (IPv6) failed");
+            close(sock);
+            exit(EXIT_FAILURE);
+        }
     }
 
     return sock;
@@ -179,8 +195,8 @@ void combine_downloaded_parts(const char *output_file, int num_parts) {
 
 // Thread function to download a byte range of file
 void *download_part(void *arg) {
-    DownloadArgs *args = (DownloadArgs *)arg;
-    int sock = open_TCP_socket(args->ip_address, 443);
+    DownloadArguments *args = (DownloadArguments *)arg;
+    int sock = open_TCP_socket(args->ip_address, 443, args->address_family);
     SSL *ssl = wrap_tcp_socket(args->ssl_ctx, sock);
 
     // Construct the HTTP GET request with Range header
@@ -188,6 +204,7 @@ void *download_part(void *arg) {
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.1\r\n"
              "Host: %s\r\n"
+             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3\r\n"
              "Range: bytes=%ld-%ld\r\n"
              "Connection: close\r\n\r\n",
              args->url.path, args->url.domain, args->range.start, args->range.end);
@@ -308,7 +325,7 @@ long get_file_size(SSL *ssl, URL url) {
 
 
 // Resolve a domain name to an IP address
-void resolve_domain(const char *domain, char *ip_address) {
+void resolve_domain(const char *domain, char *ip_address, int *address_family) {
     struct addrinfo hints, *res;         // For specifying criteria and storing result
     int status;                          // To store the status of getaddrinfo
     char ip_string[INET6_ADDRSTRLEN];    // Buffer for storing the IP address as a string
@@ -326,6 +343,7 @@ void resolve_domain(const char *domain, char *ip_address) {
     void *addr;                           // To store the resolved IP address
     
     // Check if the result is IPv4 or IPv6
+    *address_family = res->ai_family;
     if (res->ai_family == AF_INET) {
         struct sockaddr_in *ipv4 = (struct sockaddr_in *) res->ai_addr;   // Cast to IPv4
         addr = &(ipv4->sin_addr);         // Get the IPv4 address
@@ -334,9 +352,8 @@ void resolve_domain(const char *domain, char *ip_address) {
         addr = &(ipv6->sin6_addr);        // Get the IPv6 address
     }
 
-    // Convert the IP address to a string and print it
+    // Convert the IP address to a string
     inet_ntop(res->ai_family, addr, ip_string, sizeof(ip_string));
-    printf("\nResolved IP address: %s\n", ip_string);
     strcpy(ip_address, ip_string);
 
     freeaddrinfo(res);
@@ -462,11 +479,13 @@ int main(int argc, char *argv[]) {
 
     // Get the domain ip_address by resolving it
     char ip_address[INET6_ADDRSTRLEN];
-    resolve_domain(args.target_url.domain, ip_address);
+    int address_family;
+    resolve_domain(args.target_url.domain, ip_address, &address_family);
+    printf("\nResolved IP address: %s\n", ip_address);
 
     // Open a socket for a tcp connection
     int port = 443;
-    int sock = open_TCP_socket(ip_address, port);
+    int sock = open_TCP_socket(ip_address, port, address_family);
     printf("Success: Connected to server at %s:%d\n", ip_address, port);
 
     // Initialise SSL and store it in ssl_context
@@ -497,14 +516,15 @@ int main(int argc, char *argv[]) {
 
     // Start threads for each part
     pthread_t threads[args.download_parts];
-    DownloadArgs download_args[args.download_parts];
+    DownloadArguments download_args[args.download_parts];
     for (int i = 0; i < args.download_parts; i++) {
         download_args[i].ssl_ctx = ssl_ctx;
         strncpy(download_args[i].ip_address, ip_address, INET6_ADDRSTRLEN);
         download_args[i].url = args.target_url;
         download_args[i].range = ranges[i];
         download_args[i].part_number = i + 1;
-        
+        download_args[i].address_family = address_family; 
+
         pthread_create(&threads[i], NULL, download_part, &download_args[i]);
     }
 
