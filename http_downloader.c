@@ -48,9 +48,16 @@ typedef struct {
 
 
 // This function wraps the TCP Connection Socket with SSL/TLS and perform SSL handshake 
-SSL *wrap_tcp_socket(SSL_CTX *ssl_ctx, int sock) {
+SSL *wrap_tcp_socket(SSL_CTX *ssl_ctx, int sock, const char *hostname) {
     SSL *ssl = SSL_new(ssl_ctx);
     SSL_set_fd(ssl, sock);
+
+    // Set the TLS SNI hostname (Server Name Indication)
+    if (!SSL_set_tlsext_host_name(ssl, hostname)) {
+        fprintf(stderr, "Error: Failed to set SNI hostname.\n");
+        SSL_free(ssl);
+        exit(EXIT_FAILURE);
+    }
 
     // Perform the SSL handshake
     if (SSL_connect(ssl) <= 0) { 
@@ -197,14 +204,14 @@ void combine_downloaded_parts(const char *output_file, int num_parts) {
 void *download_part(void *arg) {
     DownloadArguments *args = (DownloadArguments *)arg;
     int sock = open_TCP_socket(args->ip_address, 443, args->address_family);
-    SSL *ssl = wrap_tcp_socket(args->ssl_ctx, sock);
+    SSL *ssl = wrap_tcp_socket(args->ssl_ctx, sock, args->url.domain);
 
     // Construct the HTTP GET request with Range header
     char request[2048];
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.1\r\n"
              "Host: %s\r\n"
-             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3\r\n"
+             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36\r\n"
              "Range: bytes=%ld-%ld\r\n"
              "Connection: close\r\n\r\n",
              args->url.path, args->url.domain, args->range.start, args->range.end);
@@ -291,7 +298,12 @@ long get_file_size(SSL *ssl, URL url) {
     snprintf(request, sizeof(request),
              "HEAD %s HTTP/1.1\r\n"
              "Host: %s\r\n"
+             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36\r\n"
+             "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\r\n"
+             "Accept-Encoding: gzip, deflate, br\r\n"
              "Connection: close\r\n\r\n", url.path, url.domain);
+
+    printf("\nHTTP Request:\n%s", request);
 
     // Send the HTTP HEAD request
     if (SSL_write(ssl, request, strlen(request)) <= 0) {
@@ -310,6 +322,7 @@ long get_file_size(SSL *ssl, URL url) {
 
     // Null-terminate the response string
     response[bytes_received] = '\0';
+    printf("HTTP Response:\n%s", response);
 
     // "Content-Length" header in the response tells size 
     char *content_length_str = strstr(response, "Content-Length:");
@@ -473,7 +486,7 @@ Arguments parse_argument(int argc, char *argv[]){
 int main(int argc, char *argv[]) {
     // Parse Arguments and store to struct args
     Arguments args = parse_argument(argc, argv);
-    printf("Scheme: %s \nDomain: %s \nPath: %s\n", args.target_url.scheme, args.target_url.domain, args.target_url.path);
+    printf("\nScheme: %s \nDomain: %s \nPath: %s\n", args.target_url.scheme, args.target_url.domain, args.target_url.path);
     printf("Number of Parts: %d\n", args.download_parts);
     printf("Output File Path: %s\n", args.output_file_name);
 
@@ -492,7 +505,7 @@ int main(int argc, char *argv[]) {
     SSL_CTX *ssl_ctx = ssl_init();
 
     // Wrap TCP socket with SSL/TLS and establish secure connection (handshake)
-    SSL *ssl = wrap_tcp_socket(ssl_ctx, sock);
+    SSL *ssl = wrap_tcp_socket(ssl_ctx, sock, args.target_url.domain);
     printf("SSL handshake successful\n");
 
     // Get the file size from server
@@ -505,7 +518,7 @@ int main(int argc, char *argv[]) {
         free(args.output_file_name);
         return EXIT_FAILURE;
     }
-    printf("\nFile Size: %ld bytes", file_size);
+    printf("File Size: %ld bytes", file_size);
 
     // Get byte ranges for multi-threaded download
     ByteRange ranges[args.download_parts];
